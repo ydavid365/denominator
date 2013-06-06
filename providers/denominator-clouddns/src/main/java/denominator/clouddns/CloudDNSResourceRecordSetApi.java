@@ -2,80 +2,82 @@ package denominator.clouddns;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.Iterators.emptyIterator;
+import static com.google.common.collect.Iterators.filter;
+import static com.google.common.collect.Ordering.usingToString;
 import static denominator.model.ResourceRecordSets.nameEqualTo;
 
+import java.util.Collection;
 import java.util.Iterator;
 
 import javax.inject.Inject;
 
-import org.jclouds.rackspace.clouddns.v1.CloudDNSApi;
-import org.jclouds.rackspace.clouddns.v1.domain.Domain;
-import org.jclouds.rackspace.clouddns.v1.features.RecordApi;
-
+import com.google.common.base.Function;
 import com.google.common.base.Optional;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterators;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableList.Builder;
 
 import denominator.ResourceRecordSetApi;
+import denominator.clouddns.RackspaceApis.CloudDNS;
+import denominator.clouddns.RackspaceApis.ListWithNext;
+import denominator.clouddns.RackspaceApis.Record;
 import denominator.model.ResourceRecordSet;
+import feign.FeignException;
 
 public final class CloudDNSResourceRecordSetApi implements denominator.ResourceRecordSetApi {
 
-    private final RecordApi api;
+    private final CloudDNS api;
+    private final Collection<String> domainIds;
 
-    CloudDNSResourceRecordSetApi(RecordApi recordApi) {
-        this.api = recordApi;
+    CloudDNSResourceRecordSetApi(CloudDNS api, Collection<String> domainIds) {
+        this.api = api;
+        this.domainIds = domainIds;
     }
 
     @Override
     public Iterator<ResourceRecordSet<?>> list() {
-        // assumes these are sorted, which might be bad
-        return new GroupByRecordNameAndTypeIterator(api.list().concat().iterator());
+        Function<String, ListWithNext<Record>> listFn = new Function<String, ListWithNext<Record>>() {
+            public ListWithNext<Record> apply(String arg0) {
+                return api.records(arg0);
+            }
+        };
+        return new GroupByRecordNameAndTypeIterator(toSortedIterator(listFn));
     }
 
     @Override
     public Iterator<ResourceRecordSet<?>> listByName(String name) {
         checkNotNull(name, "name was null");
-        return Iterators.filter(list(), nameEqualTo(name));
+        return filter(list(), nameEqualTo(name));
     }
 
     @Override
-    public Optional<ResourceRecordSet<?>> getByNameAndType(String name, String type) {
+    public Optional<ResourceRecordSet<?>> getByNameAndType(final String name, final String type) {
         checkNotNull(name, "name was null");
         checkNotNull(type, "type was null");
-        GroupByRecordNameAndTypeIterator it = new GroupByRecordNameAndTypeIterator(api.listByNameAndType(name, type)
-                .concat().iterator());
+        Function<String, ListWithNext<Record>> listFn = new Function<String, ListWithNext<Record>>() {
+            public ListWithNext<Record> apply(String arg0) {
+                return api.recordsByNameAndType(arg0, name, type);
+            }
+        };
+        GroupByRecordNameAndTypeIterator it = new GroupByRecordNameAndTypeIterator(toSortedIterator(listFn));
         return it.hasNext() ? Optional.<ResourceRecordSet<?>> of(it.next()) : Optional.<ResourceRecordSet<?>> absent();
     }
 
     static final class Factory implements denominator.ResourceRecordSetApi.Factory {
 
-        private final CloudDNSApi api;
+        private final CloudDNS api;
 
         @Inject
-        Factory(CloudDNSApi api) {
+        Factory(CloudDNS api) {
             this.api = api;
         }
 
         @Override
         public ResourceRecordSetApi create(final String domainName) {
-            Optional<Domain> domain = api.getDomainApi().list().concat().firstMatch(domainNameEquals(domainName));
-            checkArgument(domain.isPresent(), "domain %s not found", domainName);
-            return new CloudDNSResourceRecordSetApi(api.getRecordApiForDomain(domain.get().getId()));
+            Collection<String> domainIds = api.nameToIds().get(domainName);
+            checkArgument(!domainIds.isEmpty(), "domain %s not found", domainName);
+            return new CloudDNSResourceRecordSetApi(api, domainIds);
         }
-    }
-
-    /**
-     * Rackspace domains are addressed by id, not by name.
-     */
-    private static final Predicate<Domain> domainNameEquals(final String domainName) {
-        checkNotNull(domainName, "domainName");
-        return new Predicate<Domain>() {
-            @Override
-            public boolean apply(Domain input) {
-                return input.getName().equals(domainName);
-            }
-        };
     }
 
     @Override
@@ -101,5 +103,25 @@ public final class CloudDNSResourceRecordSetApi implements denominator.ResourceR
     @Override
     public void deleteByNameAndType(String name, String type) {
         throw new UnsupportedOperationException();
+    }
+
+    Iterator<Record> toSortedIterator(Function<String, ListWithNext<Record>> listFn) {
+        Builder<Record> records = ImmutableList.<Record> builder();
+        for (String domain : domainIds) {
+            try {
+                ListWithNext<Record> list = listFn.apply(domain);
+                records.addAll(list);
+                while (list.next != null) {
+                    list = api.records(list.next);
+                    records.addAll(list);
+                }
+            } catch (FeignException e) {
+                if (e.getMessage().indexOf("status 404") != -1) {
+                    return emptyIterator();
+                }
+                throw e;
+            }
+        }
+        return usingToString().sortedCopy(records.build()).iterator();
     }
 }
