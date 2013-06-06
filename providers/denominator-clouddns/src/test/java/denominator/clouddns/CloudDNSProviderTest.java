@@ -27,6 +27,7 @@ public class CloudDNSProviderTest {
     public void testMockMetadata() {
         assertEquals(PROVIDER.getName(), "clouddns");
         assertEquals(PROVIDER.getCredentialTypeToParameterNames(), ImmutableMultimap.<String, String> builder()
+                .putAll("password", "username", "password")
                 .putAll("apiKey", "username", "apiKey").build());
     }
 
@@ -48,7 +49,7 @@ public class CloudDNSProviderTest {
         assertEquals(manager.getApi().getZoneApi().getClass(), CloudDNSZoneApi.class);
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "no credentials supplied. clouddns requires username, apiKey")
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "no credentials supplied. clouddns requires one of the following forms: when type is password: username, password; apiKey: username, apiKey")
     public void testCredentialsRequired() {
         create(PROVIDER).getApi().getZoneApi().list();
     }
